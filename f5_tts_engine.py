@@ -393,6 +393,27 @@ class F5TTSEngine:
 
         audio, _sr, _spectrogram = result
 
+        # ── 截掉参考音频泄漏（ref audio leakage） ───────────────────
+        # F5-TTS 推理时，模型输入是 ref_text + gen_text，生成的 mel 频谱前半部分
+        # 对应参考音频内容。代码用 ref_audio_len (hop_length 对齐) 跳过这部分，
+        # 但由于参考音频时长与 ref_text 字数比的估算误差，截断点可能偏移，
+        # 导致参考音频末尾的内容（如"语速适中即可"）泄漏到输出开头。
+        #
+        # 修复：基于参考音频实际时长计算对应采样点数，额外加 0.3 秒安全余量截掉。
+        try:
+            _ref_wav, _ref_sr = torchaudio.load(self._ref_audio_processed)
+            _ref_samples = _ref_wav.shape[-1]
+            # 采样率统一为 24000
+            if _ref_sr != 24000:
+                _ref_samples = int(_ref_samples * 24000 / _ref_sr)
+            # 加 0.3 秒安全余量（约 7200 采样点），确保完全切掉参考音频内容
+            _trim_samples = _ref_samples + int(0.3 * 24000)
+            if _trim_samples < len(audio):
+                audio = audio[_trim_samples:]
+                print(f"[F5-TTS] 已截掉参考音频泄漏（{_trim_samples} 采样点，约 {_trim_samples/24000:.1f} 秒）")
+        except Exception as _e:
+            print(f"[F5-TTS] 参考音频截断跳过: {_e}")
+
         # ── 推理后立即释放中间张量 ───────────────────────────────────
         del _spectrogram, result
         if torch.cuda.is_available():
