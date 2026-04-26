@@ -1,0 +1,7 @@
+edge-tts>=6.1.0
+pygame>=2.5.0
+f5-tts>=0.1.0
+torch>=2.0.0
+torchaudio>=2.0.0
+pyttsx3>=2.90
+pymupdf>=1.23.0
