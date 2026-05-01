@@ -250,6 +250,88 @@ EMOTION_CFG_STRENGTH = {
     "😏 严肃":     2.0,
 }
 
+# ── 预置情感参考音频管理 ──────────────────────────────────────────────────
+# 预置音频存放目录：与本文件同目录下的 emotion_samples/
+# 文件命名约定：<情感标签>_<描述>.wav，例如 happy_laugh.wav、sad_cry.wav
+# 支持格式：.wav  .mp3  .flac  .m4a
+
+_SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "emotion_samples")
+
+# 文件名前缀 → 情感下拉标签的映射（自动识别）
+_FILENAME_PREFIX_TO_EMOTION = {
+    "happy":    "😊 开心",
+    "sad":      "😢 悲伤",
+    "angry":    "😠 愤怒",
+    "fear":     "😨 恐惧",
+    "surprise": "😲 惊讶",
+    "calm":     "😌 平静",
+    "excited":  "🤩 兴奋",
+    "gentle":   "🥰 温柔",
+    "serious":  "😏 严肃",
+}
+
+
+def get_emotion_samples_dir() -> str:
+    """返回预置情感音频目录路径（不保证存在）。"""
+    return _SAMPLES_DIR
+
+
+def ensure_emotion_samples_dir() -> str:
+    """确保预置情感音频目录存在，并写入 README.txt 说明文件。"""
+    os.makedirs(_SAMPLES_DIR, exist_ok=True)
+    readme = os.path.join(_SAMPLES_DIR, "README.txt")
+    if not os.path.exists(readme):
+        with open(readme, "w", encoding="utf-8") as f:
+            f.write(
+                "情感参考音频目录\n"
+                "================\n\n"
+                "将带有目标情感的音频文件放到此目录，GUI 会自动列出供选择。\n\n"
+                "命名建议（前缀决定自动归类到哪种情感）：\n"
+                "  happy_xxx.wav   → 😊 开心\n"
+                "  sad_xxx.wav     → 😢 悲伤\n"
+                "  angry_xxx.wav   → 😠 愤怒\n"
+                "  fear_xxx.wav    → 😨 恐惧\n"
+                "  surprise_xxx.wav→ 😲 惊讶\n"
+                "  calm_xxx.wav    → 😌 平静\n"
+                "  excited_xxx.wav → 🤩 兴奋\n"
+                "  gentle_xxx.wav  → 🥰 温柔\n"
+                "  serious_xxx.wav → 😏 严肃\n\n"
+                "支持格式：.wav  .mp3  .flac  .m4a\n"
+            )
+    return _SAMPLES_DIR
+
+
+def list_emotion_samples() -> list[dict]:
+    """
+    扫描预置情感音频目录，返回可用样本列表。
+
+    每项为 dict：
+      {
+        "label":   str,   # 下拉显示标签，如 "😊 开心 · happy_laugh.wav"
+        "path":    str,   # 绝对路径
+        "emotion": str,   # 匹配到的情感预设名，如 "😊 开心"（无法识别则为 ""）
+      }
+    """
+    if not os.path.isdir(_SAMPLES_DIR):
+        return []
+
+    audio_exts = {".wav", ".mp3", ".flac", ".m4a"}
+    samples = []
+    for fname in sorted(os.listdir(_SAMPLES_DIR)):
+        ext = os.path.splitext(fname)[1].lower()
+        if ext not in audio_exts:
+            continue
+        fpath = os.path.join(_SAMPLES_DIR, fname)
+        # 尝试从文件名前缀识别情感
+        prefix = fname.split("_")[0].lower()
+        emotion_tag = _FILENAME_PREFIX_TO_EMOTION.get(prefix, "")
+        if emotion_tag:
+            label = f"{emotion_tag} · {fname}"
+        else:
+            label = fname
+        samples.append({"label": label, "path": fpath, "emotion": emotion_tag})
+    return samples
+
 
 class F5TTSEngine:
     """

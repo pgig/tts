@@ -591,22 +591,55 @@ class TTSApp(tk.Tk):
         self._f5_cfg_var.trace_add("write", lambda *_: self._f5_cfg_lbl.config(
             text=f"{self._f5_cfg_var.get():.1f}"))
 
-        # 情感参考音频（可选）
+        # 情感参考音频（可选）— 预置下拉 + 自定义浏览
         ttk.Label(emo_box, text="情感参考音频（可选）：",
                   foreground="gray40").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+
         emo_ref_row = ttk.Frame(emo_box)
         emo_ref_row.grid(row=1, column=1, columnspan=4, sticky=tk.EW, pady=(6, 0))
-        self._f5_emo_ref_path = tk.StringVar()
-        ttk.Entry(emo_ref_row, textvariable=self._f5_emo_ref_path, width=42).pack(
-            side=tk.LEFT, padx=(0, 4), fill=tk.X, expand=True)
-        ttk.Button(emo_ref_row, text="浏览…",
+
+        # 预置下拉（第一列：固定宽度）
+        self._f5_emo_preset_var = tk.StringVar(value="— 不使用 —")
+        self._f5_emo_preset_combo = ttk.Combobox(
+            emo_ref_row,
+            textvariable=self._f5_emo_preset_var,
+            state="readonly",
+            width=30,
+        )
+        self._f5_emo_preset_combo.pack(side=tk.LEFT, padx=(0, 4))
+
+        # 自定义浏览按钮
+        ttk.Button(emo_ref_row, text="自定义…",
                    command=self._f5_browse_emo_ref).pack(side=tk.LEFT)
-        ttk.Button(emo_ref_row, text="✕ 清除",
-                   command=lambda: self._f5_emo_ref_path.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        # 刷新预置列表
+        ttk.Button(emo_ref_row, text="🔄",
+                   command=self._f5_refresh_emo_presets, width=3).pack(side=tk.LEFT, padx=(4, 0))
+        # 打开 emotion_samples 文件夹
+        ttk.Button(emo_ref_row, text="📂",
+                   command=self._f5_open_samples_dir, width=3).pack(side=tk.LEFT, padx=(2, 0))
+        # 清除
+        ttk.Button(emo_ref_row, text="✕",
+                   command=self._f5_clear_emo_ref, width=3).pack(side=tk.LEFT, padx=(2, 0))
+
+        # 当前生效路径（只读展示）
+        self._f5_emo_ref_path = tk.StringVar()
+        self._f5_emo_ref_lbl = ttk.Label(emo_box,
+                                          textvariable=self._f5_emo_ref_path,
+                                          foreground="gray40",
+                                          font=("微软雅黑", 8))
+        self._f5_emo_ref_lbl.grid(row=2, column=0, columnspan=5, sticky=tk.W, pady=(2, 0))
+
         ttk.Label(emo_box,
                   text="提供一段带目标情感的音频，可增强情感迁移效果（不影响主参考音频的音色克隆）",
                   foreground="gray50", font=("微软雅黑", 8),
-                  ).grid(row=2, column=0, columnspan=5, sticky=tk.W, pady=(2, 0))
+                  ).grid(row=3, column=0, columnspan=5, sticky=tk.W, pady=(0, 0))
+
+        # 预置内部数据：label → path
+        self._f5_emo_preset_map: dict[str, str] = {}
+
+        # 初次填充预置列表
+        self._f5_emo_preset_combo.bind("<<ComboboxSelected>>", self._f5_on_emo_preset_selected)
+        self.after(100, self._f5_refresh_emo_presets)   # 延迟到窗口渲染后再扫描
 
         # 情感预设变化时，自动更新 CFG 默认值
         def _on_emotion_change(*_):
@@ -639,16 +672,84 @@ class TTSApp(tk.Tk):
         self._f5_engine = None
         self._f5_cached_ref_path = None   # 追踪当前引擎对应哪个 ref_audio
         self._f5_cached_ref_text = None   # 追踪当前引擎对应哪个 ref_text
+        self._f5_cached_emotion = None    # 追踪当前情感预设
+        self._f5_cached_emo_ref = None    # 追踪当前情感参考音频路径
         self._f5_rec_text = ""             # 录音朗读文本，防止 Text widget 清空后丢失
 
+    def _f5_refresh_emo_presets(self):
+        """扫描 emotion_samples/ 目录，更新情感参考音频预置下拉列表。"""
+        try:
+            from f5_tts_engine import list_emotion_samples, ensure_emotion_samples_dir
+            ensure_emotion_samples_dir()          # 确保目录和 README 存在
+            samples = list_emotion_samples()
+        except Exception:
+            samples = []
+
+        # 构建 label → path 映射
+        self._f5_emo_preset_map = {"— 不使用 —": ""}
+        if samples:
+            for s in samples:
+                self._f5_emo_preset_map[s["label"]] = s["path"]
+        else:
+            self._f5_emo_preset_map["（暂无预置，点 📂 添加音频）"] = ""
+
+        self._f5_emo_preset_combo["values"] = list(self._f5_emo_preset_map.keys())
+
+        # 若当前选项已不在新列表中，重置为"不使用"
+        if self._f5_emo_preset_var.get() not in self._f5_emo_preset_map:
+            self._f5_emo_preset_var.set("— 不使用 —")
+            self._f5_emo_ref_path.set("")
+
+    def _f5_on_emo_preset_selected(self, _event=None):
+        """用户从预置下拉选择情感参考音频。"""
+        label = self._f5_emo_preset_var.get()
+        path = self._f5_emo_preset_map.get(label, "")
+        self._f5_emo_ref_path.set(path)
+        if path:
+            self._f5_engine = None   # 音频变了，重置引擎
+            self._update_status(f"情感参考音频：{os.path.basename(path)}")
+            # 尝试自动同步情感下拉
+            try:
+                from f5_tts_engine import list_emotion_samples
+                for s in list_emotion_samples():
+                    if s["path"] == path and s["emotion"]:
+                        if self._f5_emotion_var.get() == "无（正常）":
+                            self._f5_emotion_var.set(s["emotion"])
+                            from f5_tts_engine import EMOTION_CFG_STRENGTH
+                            self._f5_cfg_var.set(EMOTION_CFG_STRENGTH.get(s["emotion"], 2.0))
+                        break
+            except Exception:
+                pass
+        else:
+            self._f5_emo_ref_path.set("")
+
     def _f5_browse_emo_ref(self):
-        """浏览情感参考音频"""
+        """自定义浏览情感参考音频。"""
         path = filedialog.askopenfilename(title="选择情感参考音频",
             filetypes=[("音频文件", "*.wav *.mp3 *.flac *.m4a"), ("所有文件", "*.*")])
         if path:
             self._f5_emo_ref_path.set(path)
-            self._f5_engine = None   # 情感参考音频变了，重置引擎
-            self._update_status(f"情感参考音频已设置：{os.path.basename(path)}")
+            self._f5_emo_preset_var.set("— 自定义 —")   # 显示自定义标识
+            self._f5_engine = None
+            self._update_status(f"情感参考音频（自定义）：{os.path.basename(path)}")
+
+    def _f5_clear_emo_ref(self):
+        """清除情感参考音频。"""
+        self._f5_emo_ref_path.set("")
+        self._f5_emo_preset_var.set("— 不使用 —")
+        self._f5_engine = None
+
+    def _f5_open_samples_dir(self):
+        """用文件管理器打开 emotion_samples 目录。"""
+        try:
+            from f5_tts_engine import ensure_emotion_samples_dir
+            folder = ensure_emotion_samples_dir()
+            import subprocess
+            subprocess.Popen(f'explorer "{folder}"')
+        except Exception as e:
+            messagebox.showinfo("提示", f"无法打开目录：{e}")
+
+
 
     def _f5_browse_ref(self):
         path = filedialog.askopenfilename(title="选择参考音频",
