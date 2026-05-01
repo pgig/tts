@@ -220,16 +220,50 @@ class _VocoderOffloadProxy:
         return result
 
 
+# ── 情感预设配置 ──────────────────────────────────────────────────────────
+# 每种情感对应一个文本前缀标记，注入到 gen_text 开头，引导模型风格
+# 这是基于 prompt engineering 的情感控制，不需要额外模型
+EMOTION_PRESETS = {
+    "无（正常）":   "",
+    "😊 开心":     "[开心] ",
+    "😢 悲伤":     "[悲伤] ",
+    "😠 愤怒":     "[愤怒] ",
+    "😨 恐惧":     "[恐惧] ",
+    "😲 惊讶":     "[惊讶] ",
+    "😌 平静":     "[平静] ",
+    "🤩 兴奋":     "[兴奋] ",
+    "🥰 温柔":     "[温柔] ",
+    "😏 严肃":     "[严肃] ",
+}
+
+# 各情感的 CFG strength 推荐值（情感越强烈，建议适当提高）
+EMOTION_CFG_STRENGTH = {
+    "无（正常）":   2.0,
+    "😊 开心":     2.5,
+    "😢 悲伤":     2.5,
+    "😠 愤怒":     3.0,
+    "😨 恐惧":     2.5,
+    "😲 惊讶":     2.5,
+    "😌 平静":     2.0,
+    "🤩 兴奋":     3.0,
+    "🥰 温柔":     2.0,
+    "😏 严肃":     2.0,
+}
+
+
 class F5TTSEngine:
     """
     F5-TTS 声音克隆引擎。
 
     关键参数：
-      - ref_audio: 参考音频路径（支持 .wav, .mp3, .flac）
-      - ref_text:  参考音频对应的文字 transcript
-      - speed:     语速倍率（默认 1.0，>1 更快，<1 更慢）
-      - nfe_step:  推理步数（默认 32，越大越慢但可能更准确）
-      - cf_strength: CFG 强度（默认 2.0）
+      - ref_audio:       参考音频路径（支持 .wav, .mp3, .flac）
+      - ref_text:        参考音频对应的文字 transcript
+      - speed:           语速倍率（默认 1.0，>1 更快，<1 更慢）
+      - nfe_step:        推理步数（默认 32，越大越慢但可能更准确）
+      - cf_strength:     CFG 强度（默认 2.0，情感模式下自动调整）
+      - emotion:         情感预设名称，见 EMOTION_PRESETS（默认无）
+      - emotion_ref_audio: 情感参考音频路径（可选，提供带目标情感的音频
+                           以替换主参考音频进行风格引导）
     """
 
     def __init__(
@@ -239,6 +273,8 @@ class F5TTSEngine:
         speed: float = 1.0,
         nfe_step: int = 32,
         cf_strength: float = 2.0,
+        emotion: str = "无（正常）",
+        emotion_ref_audio: str | None = None,
     ):
         if not _check_f5_tts():
             raise ImportError(
@@ -251,6 +287,8 @@ class F5TTSEngine:
         self.speed = speed
         self.nfe_step = nfe_step
         self.cf_strength = cf_strength
+        self.emotion = emotion
+        self.emotion_ref_audio = emotion_ref_audio
 
         # 播放状态
         self._speaking = False
@@ -258,8 +296,10 @@ class F5TTSEngine:
         self._stop_flag = False
         self._lock = threading.Lock()
 
-        # 如果提供了参考音频，预先处理（缓存）
+        # 参考音频预处理缓存（主 ref + 情感 ref 各一份）
         self._ref_audio_processed: str | None = None
+        self._emotion_ref_processed: str | None = None
+
         if ref_audio and ref_text:
             self._preprocess_ref()
 
@@ -268,11 +308,7 @@ class F5TTSEngine:
     # ------------------------------------------------------------------
 
     def _preprocess_ref(self):
-        """预处理参考音频（F5-TTS 需要标准化格式）
-
-        preprocess_ref_audio_text 返回 (处理后音频路径, ref_text)，
-        其中路径是已重采样/格式化的 wav 文件，直接传给 infer_process。
-        """
+        """预处理主参考音频（F5-TTS 需要标准化格式）"""
         import f5_tts.infer.utils_infer  # 触发模块初始化
 
         from f5_tts.infer.utils_infer import preprocess_ref_audio_text
@@ -285,34 +321,53 @@ class F5TTSEngine:
             show_info=lambda x: print(f"  {x}"),
         )
 
-        # ── 参考音频音量归一化 ──────────────────────────────────────
-        # F5-TTS 对低音量参考音频容易产生 NaN/Inf，需要归一化到 [-0.8, 0.8]
+        self._ref_audio_processed = self._normalize_ref_audio(ref_audio_proc)
+        self.ref_text = ref_text_out   # preprocess 会自动补句末标点
+        print(f"[F5-TTS] 参考音频预处理完成: {ref_audio_proc}")
+
+        # 如果有情感参考音频，同步预处理
+        if self.emotion_ref_audio:
+            self._preprocess_emotion_ref()
+
+    def _preprocess_emotion_ref(self):
+        """预处理情感参考音频（只用于风格引导，不需要对应文字）"""
+        from f5_tts.infer.utils_infer import preprocess_ref_audio_text
+        try:
+            print(f"[F5-TTS] 预处理情感参考音频: {os.path.basename(self.emotion_ref_audio)}")
+            # 情感参考音频文字用空字符串，仅用其音频特征
+            emo_proc, _ = preprocess_ref_audio_text(
+                self.emotion_ref_audio, "",
+                show_info=lambda x: print(f"  {x}"),
+            )
+            self._emotion_ref_processed = self._normalize_ref_audio(emo_proc)
+            print(f"[F5-TTS] 情感参考音频预处理完成")
+        except Exception as e:
+            print(f"[F5-TTS] 情感参考音频预处理失败，忽略: {e}")
+            self._emotion_ref_processed = None
+
+    def _normalize_ref_audio(self, audio_path: str) -> str:
+        """音量归一化参考音频，确保推理稳定性，返回处理后路径"""
         try:
             import torchaudio as _ta
-            _wav, _sr = _ta.load(ref_audio_proc)
+            _wav, _sr = _ta.load(audio_path)
             if _sr != 24000:
                 _resampler = _ta.transforms.Resample(_sr, 24000)
                 _wav = _resampler(_wav)
-            # 转单声道
             if _wav.shape[0] > 1:
                 _wav = _wav.mean(dim=0, keepdim=True)
             _peak = _wav.abs().max().item()
             if _peak > 0 and _peak < 0.15:
-                # 音量过低，归一化到 0.7 峰值以改善推理稳定性
                 _scale = 0.7 / _peak
                 _wav = (_wav * _scale).clamp(-0.95, 0.95)
-                _ta.save(ref_audio_proc, _wav, 24000)
+                _ta.save(audio_path, _wav, 24000)
                 print(f"[F5-TTS] 参考音频音量过低（peak={_peak:.4f}），已归一化到 0.7")
             elif _peak > 0.95:
                 _wav = (_wav * (0.9 / _peak)).clamp(-0.95, 0.95)
-                _ta.save(ref_audio_proc, _wav, 24000)
+                _ta.save(audio_path, _wav, 24000)
                 print(f"[F5-TTS] 参考音频音量过大（peak={_peak:.4f}），已压限到 0.9")
         except Exception as _e:
             print(f"[F5-TTS] 参考音频归一化跳过: {_e}")
-
-        self._ref_audio_processed = ref_audio_proc
-        self.ref_text = ref_text_out   # preprocess 会自动补句末标点
-        print(f"[F5-TTS] 参考音频预处理完成: {ref_audio_proc}")
+        return audio_path
 
     # ------------------------------------------------------------------
     # 核心推理
@@ -334,7 +389,28 @@ class F5TTSEngine:
                 "F5-TTS 需要参考音频！请在初始化时传入 ref_audio 和 ref_text 参数。"
             )
 
-        print(f"[F5-TTS] 合成中: {text[:50]}{'...' if len(text) > 50 else ''}")
+        # ── 情感前缀注入 ─────────────────────────────────────────────
+        # 在 gen_text 前插入情感标记词，引导模型风格
+        emotion_prefix = EMOTION_PRESETS.get(self.emotion, "")
+        gen_text = (emotion_prefix + text) if emotion_prefix else text
+
+        # 情感模式下动态调整 CFG strength（增强情感表现力）
+        cfg_strength = EMOTION_CFG_STRENGTH.get(self.emotion, self.cf_strength)
+        # 用户自定义 cf_strength 覆盖预设（如果用户明确设置了非默认值）
+        if self.cf_strength != 2.0:
+            cfg_strength = self.cf_strength
+
+        # ── 情感参考音频选择 ─────────────────────────────────────────
+        # 若有情感参考音频，用它替代主参考音频进行推理（只影响本次推理）
+        if self.emotion_ref_audio and self._emotion_ref_processed:
+            active_ref = self._emotion_ref_processed
+            active_ref_text = ""   # 情感参考音频无文字，置空
+            print(f"[F5-TTS] 使用情感参考音频：{os.path.basename(self.emotion_ref_audio)}")
+        else:
+            active_ref = self._ref_audio_processed
+            active_ref_text = self.ref_text
+
+        print(f"[F5-TTS] 合成中: 情感=[{self.emotion}] cfg={cfg_strength:.1f} 文本={gen_text[:50]}{'...' if len(gen_text) > 50 else ''}")
 
         # ── 4GB 显存优化：monkey-patch infer_batch_process 实现 vocoder offload ──
         # 原始流程：model.sample() + vocoder.decode() 都在 GPU 上，4GB 显存不够
@@ -375,14 +451,14 @@ class F5TTSEngine:
         try:
             # 调用推理（返回 3 值: wave, sr, spectrogram）
             result = _ui.infer_process(
-                ref_audio=self._ref_audio_processed,
-                ref_text=self.ref_text,
-                gen_text=text,
+                ref_audio=active_ref,
+                ref_text=active_ref_text,
+                gen_text=gen_text,
                 model_obj=model,
                 vocoder=vocoder,
                 speed=self.speed,
                 nfe_step=self.nfe_step,
-                cfg_strength=self.cf_strength,
+                cfg_strength=cfg_strength,
             )
         finally:
             # 恢复原始函数
@@ -397,11 +473,11 @@ class F5TTSEngine:
         # F5-TTS 推理时，模型输入是 ref_text + gen_text，生成的 mel 频谱前半部分
         # 对应参考音频内容。代码用 ref_audio_len (hop_length 对齐) 跳过这部分，
         # 但由于参考音频时长与 ref_text 字数比的估算误差，截断点可能偏移，
-        # 导致参考音频末尾的内容（如"语速适中即可"）泄漏到输出开头。
+        # 导致参考音频末尾的内容泄漏到输出开头。
         #
-        # 修复：基于参考音频实际时长计算对应采样点数，额外加 0.3 秒安全余量截掉。
+        # 修复：基于实际推理时使用的参考音频时长计算采样点，额外加 0.3 秒安全余量。
         try:
-            _ref_wav, _ref_sr = torchaudio.load(self._ref_audio_processed)
+            _ref_wav, _ref_sr = torchaudio.load(active_ref)
             _ref_samples = _ref_wav.shape[-1]
             # 采样率统一为 24000
             if _ref_sr != 24000:

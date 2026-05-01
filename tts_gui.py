@@ -562,9 +562,64 @@ class TTSApp(tk.Tk):
         self._f5_speed_var.trace_add("write", lambda *_: self._f5_speed_lbl.config(text=f"{self._f5_speed_var.get():.1f}x"))
         self._f5_nfe_var.trace_add("write", lambda *_: self._f5_nfe_lbl.config(text=str(self._f5_nfe_var.get())))
 
+        # ── 情感控制区块 ─────────────────────────────────────────────
+        emo_box = ttk.LabelFrame(f, text="情感风格（可选）", padding=8)
+        emo_box.grid(row=5, column=0, sticky=tk.EW, pady=(0, 6))
+        emo_box.columnconfigure(1, weight=0)
+        emo_box.columnconfigure(3, weight=1)
+
+        # 情感下拉
+        ttk.Label(emo_box, text="情感预设：").grid(row=0, column=0, sticky=tk.W)
+        from f5_tts_engine import EMOTION_PRESETS
+        self._f5_emotion_var = tk.StringVar(value="无（正常）")
+        self._f5_emotion_combo = ttk.Combobox(
+            emo_box,
+            textvariable=self._f5_emotion_var,
+            values=list(EMOTION_PRESETS.keys()),
+            state="readonly",
+            width=16,
+        )
+        self._f5_emotion_combo.grid(row=0, column=1, sticky=tk.W, padx=(4, 16))
+
+        # CFG 强度（情感引导强度）
+        ttk.Label(emo_box, text="情感强度：").grid(row=0, column=2, sticky=tk.W)
+        self._f5_cfg_var = tk.DoubleVar(value=2.0)
+        ttk.Scale(emo_box, from_=1.0, to=6.0, variable=self._f5_cfg_var,
+                  orient=tk.HORIZONTAL, length=140).grid(row=0, column=3, sticky=tk.EW, padx=4)
+        self._f5_cfg_lbl = ttk.Label(emo_box, text="2.0")
+        self._f5_cfg_lbl.grid(row=0, column=4, padx=(4, 0))
+        self._f5_cfg_var.trace_add("write", lambda *_: self._f5_cfg_lbl.config(
+            text=f"{self._f5_cfg_var.get():.1f}"))
+
+        # 情感参考音频（可选）
+        ttk.Label(emo_box, text="情感参考音频（可选）：",
+                  foreground="gray40").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        emo_ref_row = ttk.Frame(emo_box)
+        emo_ref_row.grid(row=1, column=1, columnspan=4, sticky=tk.EW, pady=(6, 0))
+        self._f5_emo_ref_path = tk.StringVar()
+        ttk.Entry(emo_ref_row, textvariable=self._f5_emo_ref_path, width=42).pack(
+            side=tk.LEFT, padx=(0, 4), fill=tk.X, expand=True)
+        ttk.Button(emo_ref_row, text="浏览…",
+                   command=self._f5_browse_emo_ref).pack(side=tk.LEFT)
+        ttk.Button(emo_ref_row, text="✕ 清除",
+                   command=lambda: self._f5_emo_ref_path.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(emo_box,
+                  text="提供一段带目标情感的音频，可增强情感迁移效果（不影响主参考音频的音色克隆）",
+                  foreground="gray50", font=("微软雅黑", 8),
+                  ).grid(row=2, column=0, columnspan=5, sticky=tk.W, pady=(2, 0))
+
+        # 情感预设变化时，自动更新 CFG 默认值
+        def _on_emotion_change(*_):
+            from f5_tts_engine import EMOTION_CFG_STRENGTH
+            preset_cfg = EMOTION_CFG_STRENGTH.get(self._f5_emotion_var.get(), 2.0)
+            self._f5_cfg_var.set(preset_cfg)
+            # 情感切换视为参数变化，重置引擎
+            self._f5_engine = None
+        self._f5_emotion_combo.bind("<<ComboboxSelected>>", _on_emotion_change)
+
         # 按钮
         btns = ttk.Frame(f)
-        btns.grid(row=5, column=0, sticky=tk.W, pady=(0, 4))
+        btns.grid(row=6, column=0, sticky=tk.W, pady=(0, 4))
         self._f5_play = ttk.Button(btns, text="▶ 播放（克隆声音）", command=self._f5_play, width=18)
         self._f5_play.pack(side=tk.LEFT)
         self._f5_stop = ttk.Button(btns, text="⏹ 停止", command=self._f5_stop, width=12, state=tk.DISABLED)
@@ -574,7 +629,7 @@ class TTSApp(tk.Tk):
 
         # 提示标签 + 克隆质量评分
         hint_row = ttk.Frame(f)
-        hint_row.grid(row=6, column=0, sticky=tk.W, pady=(0, 4), columnspan=2)
+        hint_row.grid(row=7, column=0, sticky=tk.W, pady=(0, 4), columnspan=2)
         self._f5_hint_lbl = ttk.Label(hint_row, text="", foreground="orange", font=("微软雅黑", 9))
         self._f5_hint_lbl.pack(side=tk.LEFT)
         self._f5_quality_lbl = ttk.Label(hint_row, text="", font=("微软雅黑", 9))
@@ -585,6 +640,15 @@ class TTSApp(tk.Tk):
         self._f5_cached_ref_path = None   # 追踪当前引擎对应哪个 ref_audio
         self._f5_cached_ref_text = None   # 追踪当前引擎对应哪个 ref_text
         self._f5_rec_text = ""             # 录音朗读文本，防止 Text widget 清空后丢失
+
+    def _f5_browse_emo_ref(self):
+        """浏览情感参考音频"""
+        path = filedialog.askopenfilename(title="选择情感参考音频",
+            filetypes=[("音频文件", "*.wav *.mp3 *.flac *.m4a"), ("所有文件", "*.*")])
+        if path:
+            self._f5_emo_ref_path.set(path)
+            self._f5_engine = None   # 情感参考音频变了，重置引擎
+            self._update_status(f"情感参考音频已设置：{os.path.basename(path)}")
 
     def _f5_browse_ref(self):
         path = filedialog.askopenfilename(title="选择参考音频",
@@ -787,6 +851,8 @@ class TTSApp(tk.Tk):
         self._f5_engine = None
         self._f5_cached_ref_path = None
         self._f5_cached_ref_text = None
+        self._f5_cached_emotion = None
+        self._f5_cached_emo_ref = None
         self._f5_rec_text = ""
         self._f5_hint_lbl.config(text="")
         self._update_status("引擎已重置")
@@ -803,13 +869,23 @@ class TTSApp(tk.Tk):
         if not ref_text:
             raise ValueError("请输入参考音频对应的文字 transcript！")
 
-        # 音频路径或参考文本变了，清缓存重建
+        emotion = self._f5_emotion_var.get()
+        emo_ref = self._f5_emo_ref_path.get().strip() or None
+        cfg = round(self._f5_cfg_var.get(), 2)
+
+        # 任意参数变化时清缓存重建引擎
         if (self._f5_engine is not None
                 and (self._f5_cached_ref_path != ref_audio
-                     or self._f5_cached_ref_text != ref_text)):
+                     or self._f5_cached_ref_text != ref_text
+                     or getattr(self, "_f5_cached_emotion", None) != emotion
+                     or getattr(self, "_f5_cached_emo_ref", None) != emo_ref)):
             self._f5_engine = None
 
         if self._f5_engine is not None:
+            # 仅更新可热更新参数（speed / nfe / cfg）
+            self._f5_engine.speed = self._f5_speed_var.get()
+            self._f5_engine.nfe_step = self._f5_nfe_var.get()
+            self._f5_engine.cf_strength = cfg
             return self._f5_engine
 
         self._f5_engine = F5TTSEngine(
@@ -817,9 +893,14 @@ class TTSApp(tk.Tk):
             ref_text=ref_text,
             speed=self._f5_speed_var.get(),
             nfe_step=self._f5_nfe_var.get(),
+            cf_strength=cfg,
+            emotion=emotion,
+            emotion_ref_audio=emo_ref,
         )
         self._f5_cached_ref_path = ref_audio
         self._f5_cached_ref_text = ref_text
+        self._f5_cached_emotion = emotion
+        self._f5_cached_emo_ref = emo_ref
         self._f5_rec_text = ref_text
         return self._f5_engine
 
